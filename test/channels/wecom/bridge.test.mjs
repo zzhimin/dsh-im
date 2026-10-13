@@ -29,10 +29,10 @@ const PNG_1X1 = Buffer.from(
   'base64',
 );
 const INITIAL_THINKING_TEXT = '正在思考中…';
-const INITIAL_THINKING_STREAM = `<think>${INITIAL_THINKING_TEXT}`;
+const INITIAL_THINKING_STREAM = INITIAL_THINKING_TEXT;
 
 function streamPreview(answer, thinking = INITIAL_THINKING_TEXT) {
-  return `<think>${thinking}</think>\n${answer}`;
+  return `${thinking}\n${answer}`;
 }
 
 test('Enterprise WeChat native image adapter uploads and sends an image media message', async () => {
@@ -742,8 +742,8 @@ test('Enterprise WeChat messages stream Harness progress and finalize once', asy
   await bridge.accept(frame());
   assert.deepEqual(replies, [
     { streamId: 'stream-1', content: INITIAL_THINKING_STREAM, finish: false },
-    { streamId: 'stream-1', content: '<think>正在使用网页搜索…', finish: false },
-    { streamId: 'stream-1', content: '<think>正在整理结果…', finish: false },
+    { streamId: 'stream-1', content: '正在使用网页搜索…', finish: false },
+    { streamId: 'stream-1', content: '正在整理结果…', finish: false },
     {
       streamId: 'stream-1',
       content: streamPreview('回答中', '正在整理结果…'),

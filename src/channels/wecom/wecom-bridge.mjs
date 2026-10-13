@@ -399,9 +399,12 @@ function streamContent(thinkingText, answerText = '', { finish = false } = {}) {
     .replace(/<\/?think>/gi, '')
     .trim();
   if (!thinking) return answer;
+  // Plain text only: the WeCom client keeps a <think> section visible forever
+  // once rendered, even when the finish frame replaces the content without one
+  // ("正在思考中" stuck above the delivered answer). Never emit <think> here.
   return answer
-    ? `<think>${thinking}</think>\n${answer}`
-    : `<think>${thinking}`;
+    ? `${thinking}\n${answer}`
+    : `${thinking}`;
 }
 
 function artifactFailureText(fileName, error) {
