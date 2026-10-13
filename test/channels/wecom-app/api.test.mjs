@@ -168,3 +168,133 @@ test('downloadMedia returns raw bytes and ignores JSON error envelopes', async (
   const result = await api.downloadMedia({ mediaId: 'media-1' });
   assert.deepEqual([...result.data], [1, 2, 3]);
 });
+
+test('XML callbacks parse voice, video, location, and link messages', () => {
+  const voice = parseWecomAppPlainMessage([
+    '<xml>',
+    '<FromUserName><![CDATA[user-1]]></FromUserName>',
+    '<MsgType><![CDATA[voice]]></MsgType>',
+    '<MediaId><![CDATA[voice-media-1]]></MediaId>',
+    '<Format><![CDATA[amr]]></Format>',
+    '<Recognition><![CDATA[明天下午三点开会]]></Recognition>',
+    '<MsgId>200001</MsgId>',
+    '<AgentID>1000002</AgentID>',
+    '</xml>',
+  ].join(''));
+  assert.equal(voice.msgtype, 'voice');
+  assert.equal(voice.voice.mediaId, 'voice-media-1');
+  assert.equal(voice.voice.format, 'amr');
+  assert.equal(voice.voice.recognition, '明天下午三点开会');
+
+  const video = parseWecomAppPlainMessage([
+    '<xml>',
+    '<FromUserName><![CDATA[user-1]]></FromUserName>',
+    '<MsgType><![CDATA[video]]></MsgType>',
+    '<MediaId><![CDATA[video-media-1]]></MediaId>',
+    '<ThumbMediaId><![CDATA[thumb-media-1]]></ThumbMediaId>',
+    '<MsgId>200002</MsgId>',
+    '<AgentID>1000002</AgentID>',
+    '</xml>',
+  ].join(''));
+  assert.equal(video.msgtype, 'video');
+  assert.equal(video.video.mediaId, 'video-media-1');
+  assert.equal(video.video.thumbMediaId, 'thumb-media-1');
+
+  const location = parseWecomAppPlainMessage([
+    '<xml>',
+    '<FromUserName><![CDATA[user-1]]></FromUserName>',
+    '<MsgType><![CDATA[location]]></MsgType>',
+    '<Location_X>23.123456</Location_X>',
+    '<Location_Y>113.123456</Location_Y>',
+    '<Scale>15</Scale>',
+    '<Label><![CDATA[福州市鼓楼区]]></Label>',
+    '<MsgId>200003</MsgId>',
+    '<AgentID>1000002</AgentID>',
+    '</xml>',
+  ].join(''));
+  assert.equal(location.msgtype, 'location');
+  assert.equal(location.location.latitude, '23.123456');
+  assert.equal(location.location.longitude, '113.123456');
+  assert.equal(location.location.scale, '15');
+  assert.equal(location.location.label, '福州市鼓楼区');
+
+  const link = parseWecomAppPlainMessage([
+    '<xml>',
+    '<FromUserName><![CDATA[user-1]]></FromUserName>',
+    '<MsgType><![CDATA[link]]></MsgType>',
+    '<Title><![CDATA[标题]]></Title>',
+    '<Description><![CDATA[描述]]></Description>',
+    '<Url><![CDATA[https://example.com/a]]></Url>',
+    '<PicUrl><![CDATA[https://example.com/a.png]]></PicUrl>',
+    '<MsgId>200004</MsgId>',
+    '<AgentID>1000002</AgentID>',
+    '</xml>',
+  ].join(''));
+  assert.equal(link.msgtype, 'link');
+  assert.equal(link.link.title, '标题');
+  assert.equal(link.link.url, 'https://example.com/a');
+  assert.equal(link.link.picUrl, 'https://example.com/a.png');
+});
+
+test('JSON callbacks parse voice, video, location, and link records', () => {
+  const voice = parseWecomAppPlainMessage(JSON.stringify({
+    msgid: 'json-voice', msgtype: 'voice', from: { userid: 'user-1' },
+    voice: { media_id: 'voice-media-2', format: 'amr', recognition: '你好' },
+  }));
+  assert.equal(voice.voice.mediaId, 'voice-media-2');
+  assert.equal(voice.voice.recognition, '你好');
+
+  const video = parseWecomAppPlainMessage(JSON.stringify({
+    msgid: 'json-video', msgtype: 'video', from: { userid: 'user-1' },
+    video: { mediaid: 'video-media-2', thumb_media_id: 'thumb-2' },
+  }));
+  assert.equal(video.video.mediaId, 'video-media-2');
+  assert.equal(video.video.thumbMediaId, 'thumb-2');
+
+  const location = parseWecomAppPlainMessage(JSON.stringify({
+    msgid: 'json-loc', msgtype: 'location', from: { userid: 'user-1' },
+    location: { x: 23.1, y: 113.2, scale: 15, label: '福州' },
+  }));
+  assert.equal(location.location.latitude, 23.1);
+  assert.equal(location.location.longitude, 113.2);
+  assert.equal(location.location.label, '福州');
+
+  const link = parseWecomAppPlainMessage(JSON.stringify({
+    msgid: 'json-link', msgtype: 'link', from: { userid: 'user-1' },
+    link: { title: 'T', description: 'D', url: 'https://example.com/b', pic_url: 'https://example.com/b.png' },
+  }));
+  assert.equal(link.link.title, 'T');
+  assert.equal(link.link.picUrl, 'https://example.com/b.png');
+});
+
+test('uploadMedia and sendArtifactFile support voice and video media types', async () => {
+  const calls = [];
+  const api = new WecomAppApi({
+    corpId: CORP_ID,
+    corpSecret: 'unit-corp-secret-value',
+    agentId: '1000002',
+    fetchImpl: async (url, init = {}) => {
+      calls.push({ url: String(url), init });
+      if (String(url).includes('/cgi-bin/gettoken')) {
+        return new Response(JSON.stringify({ errcode: 0, access_token: 'token-1', expires_in: 7200 }), {
+          status: 200, headers: { 'content-type': 'application/json' },
+        });
+      }
+      if (String(url).includes('/cgi-bin/media/upload')) {
+        return new Response(JSON.stringify({ errcode: 0, media_id: 'uploaded-1' }), {
+          status: 200, headers: { 'content-type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify({ errcode: 0 }), {
+        status: 200, headers: { 'content-type': 'application/json' },
+      });
+    },
+  });
+  await api.sendArtifactFile({ userId: 'user-1', kind: 'video', bytes: Buffer.from([4, 5, 6]), filename: 'clip.mp4' });
+  const upload = calls.find((call) => call.url.includes('/cgi-bin/media/upload'));
+  assert.equal(upload.url.includes('type=video'), true);
+  const send = calls.find((call) => call.url.includes('/cgi-bin/message/send'));
+  const body = JSON.parse(send.init.body);
+  assert.equal(body.msgtype, 'video');
+  assert.equal(body.video.media_id, 'uploaded-1');
+});

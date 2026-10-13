@@ -96,9 +96,10 @@ export function parseWecomAppPlainMessage(raw) {
   let data;
   if (isXmlFormat(source)) {
     const xml = parseWecomAppXmlBody(source);
+    const xmlMsgType = (xml.MsgType ?? xml.msgtype ?? '').toLowerCase();
     data = {
       msgid: xml.MsgId ?? xml.msgid,
-      msgtype: (xml.MsgType ?? xml.msgtype ?? '').toLowerCase(),
+      msgtype: xmlMsgType,
       createTime: xml.CreateTime ?? xml.createTime,
       agentId: xml.AgentID ?? xml.agentid,
       from: xml.FromUserName ? { userid: xml.FromUserName } : undefined,
@@ -107,6 +108,18 @@ export function parseWecomAppPlainMessage(raw) {
       image: xml.PicUrl ? { url: xml.PicUrl } : undefined,
       mediaId: xml.MediaId ?? xml.mediaid,
       recognition: xml.Recognition,
+      voice: xmlMsgType === 'voice'
+        ? { mediaId: xml.MediaId ?? xml.mediaid, format: xml.Format, recognition: xml.Recognition }
+        : undefined,
+      video: xmlMsgType === 'video'
+        ? { mediaId: xml.MediaId ?? xml.mediaid, thumbMediaId: xml.ThumbMediaId, format: xml.Format }
+        : undefined,
+      location: xmlMsgType === 'location'
+        ? { latitude: xml.Location_X, longitude: xml.Location_Y, scale: xml.Scale, label: xml.Label }
+        : undefined,
+      link: xmlMsgType === 'link'
+        ? { title: xml.Title, description: xml.Description, url: xml.Url, picUrl: xml.PicUrl }
+        : undefined,
       event: (xml.Event ?? xml.event ?? '').toLowerCase() || undefined,
       eventKey: xml.EventKey,
       stream: xml.StreamId ? { id: xml.StreamId } : undefined,
@@ -134,7 +147,36 @@ export function parseWecomAppPlainMessage(raw) {
       eventKey: data.eventkey ?? undefined,
       stream: isRecord(data.stream) ? data.stream : undefined,
       chatid: typeof data.chatid === 'string' ? data.chatid : undefined,
-      voice: isRecord(data.voice) ? data.voice : undefined,
+      voice: isRecord(data.voice)
+        ? {
+            mediaId: data.voice.mediaid ?? data.voice.media_id,
+            format: typeof data.voice.format === 'string' ? data.voice.format : undefined,
+            recognition: typeof data.voice.recognition === 'string' ? data.voice.recognition : undefined,
+          }
+        : undefined,
+      video: isRecord(data.video)
+        ? {
+            mediaId: data.video.mediaid ?? data.video.media_id,
+            thumbMediaId: data.video.thumb_mediaid ?? data.video.thumb_media_id,
+            format: typeof data.video.format === 'string' ? data.video.format : undefined,
+          }
+        : undefined,
+      location: isRecord(data.location)
+        ? {
+            latitude: data.location.x ?? data.location.latitude,
+            longitude: data.location.y ?? data.location.longitude,
+            scale: data.location.scale,
+            label: typeof data.location.label === 'string' ? data.location.label : undefined,
+          }
+        : undefined,
+      link: isRecord(data.link)
+        ? {
+            title: typeof data.link.title === 'string' ? data.link.title : undefined,
+            description: typeof data.link.description === 'string' ? data.link.description : undefined,
+            url: typeof data.link.url === 'string' ? data.link.url : undefined,
+            picUrl: data.link.pic_url ?? data.link.picurl,
+          }
+        : undefined,
     };
   }
   return data;
@@ -342,7 +384,7 @@ export class WecomAppApi {
   }
 
   async uploadMedia({ type = 'image', bytes, filename, signal } = {}) {
-    const mediaType = type === 'file' ? 'file' : 'image';
+    const mediaType = ['file', 'voice', 'video'].includes(type) ? type : 'image';
     if (!(bytes instanceof Uint8Array) || bytes.length === 0) {
       throw new WecomAppError('bad-request', 'uploadMedia requires non-empty bytes');
     }
@@ -423,7 +465,7 @@ export class WecomAppApi {
     if (!target || !data || data.length === 0 || !cleanString(filename)) {
       throw new WecomAppError('bad-request', 'sendArtifactFile requires userId, bytes, and filename');
     }
-    const mediaType = kind === 'file' ? 'file' : 'image';
+    const mediaType = ['file', 'voice', 'video'].includes(kind) ? kind : 'image';
     const upload = await this.uploadMedia({ type: mediaType, bytes: data, filename: cleanString(filename), signal });
     return this.sendMedia({ userId: target, mediaType, mediaId: upload.media_id, signal });
   }

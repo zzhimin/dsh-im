@@ -69,12 +69,12 @@ import { WECOM_APP_TEXT_MAX_BYTES, splitUtf8ByBytes } from './wecom-app-api.mjs'
 
 const INTERACTION_RESOLVED_TEXT = () => t('这个问题已在其他客户端处理，无需再次回答。');
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
-const UNSUPPORTED_INBOUND_TEXT = () => t('企业微信应用目前支持文字和图片消息。');
+const UNSUPPORTED_INBOUND_TEXT = () => t('企业微信应用目前支持文字、图片、语音、视频、位置和链接消息。');
 
 const HELP_TEXT = () => [
   t('企业微信应用已连接 DeepSeek Harness，可在微信中直接使用。'),
   '',
-  t('直接发送文字或图片即可继续当前会话。'),
+  t('直接发送文字、图片、语音、视频、位置或链接即可继续当前会话。'),
   t('/new  开启一个全新会话'),
   t('/compact  压缩当前会话的较早上下文'),
   t('/clear  清空当前会话上下文（保留 Session 绑定和历史记录）'),
@@ -104,7 +104,7 @@ const HELP_TEXT = () => [
   t('/help  显示本帮助'),
 ].join('\n');
 
-const WELCOME_TEXT = () => t('企业微信应用已连接 DeepSeek Harness。直接发送文字或图片即可开始，发送 /help 查看可用命令。');
+const WELCOME_TEXT = () => t('企业微信应用已连接 DeepSeek Harness。直接发送文字、图片、语音、视频、位置或链接即可开始，发送 /help 查看可用命令。');
 
 function conversationKey(userId) {
   return `p2p:${userId}`;
@@ -119,12 +119,70 @@ function messageText(message) {
   return typeof message.text?.content === 'string' ? message.text.content : '';
 }
 
+function isRecord(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
 function hasImageItems(message) {
   return message?.msgtype === 'image' && Boolean(message.image?.url || message.mediaId);
 }
 
+// Normalized voice payload: WeCom delivers the media id at the top level for
+// XML callbacks and inside a voice record for JSON callbacks.
+function voiceInfo(message) {
+  if (message?.msgtype !== 'voice') return null;
+  const record = isRecord(message.voice) ? message.voice : {};
+  const mediaId = nonEmptyString(record.mediaId) ?? nonEmptyString(record.media_id) ?? nonEmptyString(message.mediaId);
+  const format = nonEmptyString(record.format);
+  const recognition = nonEmptyString(record.recognition) ?? nonEmptyString(message.recognition);
+  if (!mediaId && !recognition) return null;
+  return { mediaId, format, recognition };
+}
+
+function videoInfo(message) {
+  if (message?.msgtype !== 'video') return null;
+  const record = isRecord(message.video) ? message.video : {};
+  const mediaId = nonEmptyString(record.mediaId) ?? nonEmptyString(record.media_id) ?? nonEmptyString(message.mediaId);
+  if (!mediaId) return null;
+  const thumbMediaId = nonEmptyString(record.thumbMediaId) ?? nonEmptyString(record.thumb_media_id);
+  const format = nonEmptyString(record.format);
+  return { mediaId, thumbMediaId, format };
+}
+
+function locationInfo(message) {
+  if (message?.msgtype !== 'location') return null;
+  const record = isRecord(message.location) ? message.location : {};
+  const latitude = record.latitude ?? record.x;
+  const longitude = record.longitude ?? record.y;
+  const label = nonEmptyString(record.label);
+  if (latitude === undefined && longitude === undefined && !label) return null;
+  return { latitude, longitude, scale: record.scale, label };
+}
+
+function linkInfo(message) {
+  if (message?.msgtype !== 'link') return null;
+  const record = isRecord(message.link) ? message.link : {};
+  const url = nonEmptyString(record.url);
+  const title = nonEmptyString(record.title);
+  if (!url && !title) return null;
+  return {
+    title,
+    description: nonEmptyString(record.description),
+    url,
+    picUrl: nonEmptyString(record.picUrl) ?? nonEmptyString(record.pic_url),
+  };
+}
+
 function supportedInboundType(message) {
-  return message?.msgtype === 'text' || message?.msgtype === 'image';
+  switch (message?.msgtype) {
+    case 'text': return true;
+    case 'image': return hasImageItems(message);
+    case 'voice': return voiceInfo(message) !== null;
+    case 'video': return videoInfo(message) !== null;
+    case 'location': return locationInfo(message) !== null;
+    case 'link': return linkInfo(message) !== null;
+    default: return false;
+  }
 }
 
 function answerTextForDelivery(answer, artifacts) {
@@ -175,13 +233,67 @@ function imageSource(api, image) {
   };
 }
 
-function wecomAppInboundMessage(message, api) {
+// Inbound voice/video source: the media lives behind the authenticated media
+// download API. Loads are cached so an eager prefetch survives the queue wait
+// without a second download.
+function mediaSource(api, { mediaId, fallbackName }) {
+  const id = nonEmptyString(mediaId);
+  if (!id) return null;
+  let cached = null;
   return {
-    content: messageText(message),
+    async load({ signal } = {}) {
+      signal?.throwIfAborted();
+      if (cached) return cached;
+      const result = await api.downloadMedia({ mediaId: id, signal });
+      cached = { data: result.data, name: result.filename ?? fallbackName };
+      return cached;
+    },
+  };
+}
+
+function locationText(info) {
+  const coordinates = info.latitude !== undefined && info.longitude !== undefined
+    ? t('（纬度 {latitude}，经度 {longitude}）', { latitude: String(info.latitude), longitude: String(info.longitude) })
+    : '';
+  return t('📍 位置：{label}{coordinates}', { label: info.label ?? '', coordinates });
+}
+
+function linkText(info) {
+  const lines = [];
+  if (info.title) lines.push(t('🔗 链接：{title}', { title: info.title }));
+  if (info.description) lines.push(info.description);
+  if (info.url) lines.push(info.url);
+  if (lines.length === 0) lines.push(t('🔗 链接消息'));
+  return lines.join('\n');
+}
+
+function wecomAppInboundMessage(message, api) {
+  const voice = voiceInfo(message);
+  const video = videoInfo(message);
+  const location = locationInfo(message);
+  const link = linkInfo(message);
+  let content = messageText(message);
+  const files = [];
+  if (voice) {
+    if (!content && voice.recognition) content = voice.recognition;
+    const source = mediaSource(api, { mediaId: voice.mediaId, fallbackName: `voice.${voice.format ?? 'amr'}` });
+    if (source) files.push(source);
+    if (!content) content = t('[语音消息]');
+  } else if (video) {
+    const source = mediaSource(api, { mediaId: video.mediaId, fallbackName: `video.${video.format ?? 'mp4'}` });
+    if (source) files.push(source);
+    if (!content) content = t('[视频消息]');
+  } else if (location) {
+    content = locationText(location);
+  } else if (link) {
+    content = linkText(link);
+  }
+  return {
+    content,
     images: hasImageItems(message)
       ? [imageSource(api, { url: message.image?.url, mediaId: message.mediaId })].filter(Boolean)
       : [],
-    files: [],
+    files,
   };
 }
 
@@ -271,9 +383,14 @@ export class WecomAppBridge {
     if (this.#closed || this.#signal?.aborted) return Promise.resolve();
     const messageId = nonEmptyString(message?.msgid);
     const sender = nonEmptyString(message?.from?.userid);
-    if (!messageId || !sender || !supportedInboundType(message)
+    if (!messageId || !sender
       || this.#state.hasSeen(messageId) || this.#acceptedMessageIds.has(messageId)) {
       return Promise.resolve();
+    }
+    if (!supportedInboundType(message)) {
+      return this.#send(sender, UNSUPPORTED_INBOUND_TEXT())
+        .then(() => this.#state.markSeen(messageId))
+        .catch(() => undefined);
     }
     const commandText = nonEmptyString(messageText(message)) ?? '';
     const hasImages = hasImageItems(message);
@@ -1065,7 +1182,11 @@ export class WecomAppBridge {
       channelKey: 'wecom-app',
       signal: this.#signal,
       sendImage: (file) => sendArtifact('image')(file),
-      sendFile: (file) => sendArtifact('file')(file),
+      // Video artifacts go out as native video messages; audio stays a plain
+      // file because WeCom voice messages only play AMR audio.
+      sendFile: (file) => sendArtifact(
+        String(file?.mediaType ?? '').toLowerCase().startsWith('video/') ? 'video' : 'file',
+      )(file),
       onFailure: (artifact, error) => setLastMessageFailure(this.#status, error, {
         userMessage: artifactFailureText(artifact?.fileName, error),
         reason: error?.code,

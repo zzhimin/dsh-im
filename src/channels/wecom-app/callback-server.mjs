@@ -418,7 +418,7 @@ export class WecomAppCallbackServer {
     } catch {
       streamEnabled = false;
     }
-    if (streamEnabled && msgid && (message.msgtype === 'text' || message.msgtype === 'image')) {
+    if (streamEnabled && msgid && ['text', 'image', 'voice', 'video', 'location', 'link'].includes(message.msgtype)) {
       streamState = this.createStream({ botId: route.botId, msgid });
       this.#replyEncrypted(route, envelope, response, {
         msgtype: 'stream',

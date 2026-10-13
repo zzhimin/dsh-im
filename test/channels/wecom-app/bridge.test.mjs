@@ -190,3 +190,123 @@ test('rejected senders never reach Harness and never get replies', async () => {
   await bridge.close();
   await rm(root, { recursive: true, force: true });
 });
+
+function capturingHarness(answer = '好的') {
+  const calls = { prompts: [], options: [] };
+  return {
+    calls,
+    harness: {
+      ensureRunning: async () => {},
+      sessionExists: async () => true,
+      createSession: async () => 'session-1',
+      ask: async (_sessionId, prompt, options = {}) => {
+        calls.prompts.push(prompt);
+        calls.options.push(options);
+        return answer;
+      },
+    },
+  };
+}
+
+test('voice messages feed recognition text and attach the audio download', async () => {
+  const { root, state } = await stateFixture();
+  const sends = [];
+  const downloads = [];
+  const { calls, harness } = capturingHarness('好的');
+  const bridge = new WecomAppBridge({
+    api: {
+      sendText: async ({ content }) => {
+        sends.push(content);
+        return { message_id: 'outbound' };
+      },
+      downloadMedia: async ({ mediaId }) => {
+        downloads.push(mediaId);
+        return { data: Buffer.from([9, 9, 9]), filename: 'voice.amr' };
+      },
+    },
+    harness,
+    state,
+    status: { messagesReceived: 0, messagesReplied: 0 },
+  });
+
+  await bridge.accept({
+    msgid: 'm-voice-1',
+    msgtype: 'voice',
+    from: { userid: 'user-1' },
+    mediaId: 'voice-media-1',
+    voice: { mediaId: 'voice-media-1', format: 'amr', recognition: '明天下午三点开会' },
+  });
+  await eventually(() => sends.length > 0);
+  assert.match(sends.at(-1), /好的/);
+  assert.match(String(calls.prompts.at(-1)), /明天下午三点开会/);
+  assert.equal(calls.options.at(-1).files.length, 1);
+  const loaded = await calls.options.at(-1).files[0].load();
+  assert.equal(loaded.name, 'voice.amr');
+  assert.deepEqual(downloads, ['voice-media-1']);
+  assert.equal(state.hasSeen('m-voice-1'), true);
+  await bridge.close();
+  await rm(root, { recursive: true, force: true });
+});
+
+test('location and link messages are converted into text prompts', async () => {
+  const { root, state } = await stateFixture();
+  const sends = [];
+  const { calls, harness } = capturingHarness('收到');
+  const bridge = new WecomAppBridge({
+    api: { sendText: async ({ content }) => {
+      sends.push(content);
+      return { message_id: 'outbound' };
+    } },
+    harness,
+    state,
+    status: { messagesReceived: 0, messagesReplied: 0 },
+  });
+
+  await bridge.accept({
+    msgid: 'm-loc-1',
+    msgtype: 'location',
+    from: { userid: 'user-1' },
+    location: { latitude: 23.1, longitude: 113.2, scale: 15, label: '福州市鼓楼区' },
+  });
+  await bridge.accept({
+    msgid: 'm-link-1',
+    msgtype: 'link',
+    from: { userid: 'user-1' },
+    link: { title: '公告', description: '停机维护', url: 'https://example.com/a' },
+  });
+  await eventually(() => sends.length >= 2);
+  assert.match(String(calls.prompts.at(-2)), /福州市鼓楼区/);
+  assert.match(String(calls.prompts.at(-2)), /位置/);
+  assert.match(String(calls.prompts.at(-1)), /公告/);
+  assert.match(String(calls.prompts.at(-1)), /https:\/\/example\.com\/a/);
+  assert.equal(state.hasSeen('m-loc-1'), true);
+  assert.equal(state.hasSeen('m-link-1'), true);
+  await bridge.close();
+  await rm(root, { recursive: true, force: true });
+});
+
+test('unsupported message types get the capability hint and never reach Harness', async () => {
+  const { root, state } = await stateFixture();
+  const sends = [];
+  let asked = 0;
+  const bridge = new WecomAppBridge({
+    api: { sendText: async ({ content }) => {
+      sends.push(content);
+      return { message_id: 'outbound' };
+    } },
+    harness: { ensureRunning: async () => {}, sessionExists: async () => true, createSession: async () => 's', ask: async () => { asked += 1; return 'x'; } },
+    state,
+    status: { messagesReceived: 0, messagesReplied: 0 },
+  });
+
+  await bridge.accept({
+    msgid: 'm-unknown-1',
+    msgtype: 'mystery',
+    from: { userid: 'user-1' },
+  });
+  await eventually(() => sends.length > 0);
+  assert.match(sends.at(-1), /支持/);
+  assert.equal(asked, 0);
+  await bridge.close();
+  await rm(root, { recursive: true, force: true });
+});
